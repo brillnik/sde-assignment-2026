@@ -66,8 +66,8 @@ def hallucination_status(store, wf, prompt, now_hb, since_hb, changed=False):
     pv = stats.binom_sf(k, n, p0) if n else 1.0
     rate = k / n if n else 0.0
     return {"prompt": prompt, "n": n, "flags": k, "rate": round(rate, 4), "baseline": round(p0, 4), "p_value": pv,
-            "spike": bool((n >= 40 and k >= 4 and rate >= 2.0 * p0 and pv < 1e-3) if changed
-                      else (n >= 80 and k >= 4 and rate >= 2.5 * p0 and pv < 1e-4)), "since_hb": lo}
+            "spike": bool((n >= 40 and k >= 4 and rate >= 1.75 * p0 and pv < 1e-3) if changed
+                      else (n >= 80 and k >= 4 and rate >= 1.75 * p0 and pv < 1e-4)), "since_hb": lo}
 
 
 def kpi_drift(store, wf, info, now_hb, recent_h=24, base_h=24 * 7):

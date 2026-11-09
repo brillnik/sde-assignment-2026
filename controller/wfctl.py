@@ -342,7 +342,7 @@ class WF:
         for d in unseen:
             w[d] = expl if seen else 1.0
         if seen:
-            sc = {d: (rows[d][1] / rows[d][0]) ** 4 for d in seen}
+            sc = {d: (rows[d][1] / rows[d][0]) for d in seen}      # ~uniform over healthy IDs: spreads per-ID load, no winner-take-all
             t = sum(sc.values())
             for d in seen:
                 w[d] = remaining * sc[d] / t
