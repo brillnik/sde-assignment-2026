@@ -1,0 +1,13 @@
+killed controller after 3s at sim: 2027-01-06T06:00:00+05:30
+killed controller after 2s at sim: 2027-01-08T04:00:00+05:30
+killed controller after 4s at sim: 2027-01-12T06:45:00+05:30
+killed controller after 1s at sim: 2027-01-13T02:15:00+05:30
+controller already finished
+--- final restart: runs to completion
+PASS no proposal left in 'intent'/'applying' 
+PASS no config version applied twice for one proposal 
+PASS every applied proposal has a recorded decision trail 
+PASS event cursor == last chunk 
+PASS config history has no duplicate versions 
+proposals total=19 applied=18; decisions=104
+see reports/crash_02.md for the simulator-side governance counts (apply_conflicts must be 0, no duplicate requests)
