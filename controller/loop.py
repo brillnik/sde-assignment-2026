@@ -30,6 +30,8 @@ class Controller:
         self.wfs = {}
         self.stats = {"ingest_eps": 0.0, "decision_lag_s": 0.0, "events": 0, "tick_s": 0.0}
         self.view_port = view_port
+        from .alerts import Alerts
+        self.alerts = Alerts(self)
 
     def check_world(self):
         """A state DB belongs to exactly one simulated world. If the simulator is a different scenario, or a fresh world
@@ -50,12 +52,19 @@ class Controller:
         return t.isoformat()
 
     def _credit_gate(self, wf, cost):
-        """Fair share of credits across workflows, 25% held back for incidents of anyone. Incidents may dip into the reserve."""
+        """Each workflow has an equal share of 75% of the budget; the remaining 25% is a common incident reserve that a
+        workflow may only dip into after exhausting its own share, and that all workflows draw down together."""
         if self.credits is None:
             return True
-        spent = self.s.q("SELECT COALESCE(SUM(cost),0) FROM credits WHERE wf=?", (wf,))[0][0]
+        if self.credits - cost < 0:
+            return False
         share = 0.75 * self.credit_total / max(len(self.wfs), 1)
-        return self.credits - cost >= 0 and spent + cost <= max(share, 0.5 * self.credit_total) + 0.25 * self.credit_total
+        spent = dict(self.s.q("SELECT wf, SUM(cost) FROM credits GROUP BY wf"))
+        mine = spent.get(wf, 0.0) + cost
+        if mine <= share:
+            return True
+        overdraw = sum(max(0.0, v - share) for w, v in spent.items() if w != wf) + (mine - share)
+        return overdraw <= 0.25 * self.credit_total
 
     def validate(self, wf, prompt, n, why):
         cost = -(-n // 100)
@@ -160,3 +169,4 @@ class Controller:
                 except Exception:
                     pass
         self.s.x("INSERT INTO metrics VALUES(?,?,?)", (self.now, "credits_remaining", self.credits or 0))
+        self.alerts.evaluate()

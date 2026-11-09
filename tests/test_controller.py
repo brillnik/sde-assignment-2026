@@ -117,3 +117,49 @@ def test_ingest_is_exactly_once_per_chunk():
         ing._ingest_chunk("events", 0, _chunk(evs))      # replayed chunk (restart): event_id floor makes it a no-op
         assert s.q("SELECT SUM(dials),SUM(conn),SUM(eng) FROM agg_var")[0] == (1, 1, 1)
         assert s.kget("cursor:events") == 0
+
+
+def test_log_ratio_variance_with_p0_ignores_cell_outcome():
+    # same counts of dials, different observed outcomes: with a workflow-wide p0 the variance must be identical
+    _, v1 = stats.log_ratio(10, 100, 10, 100, 0.5)
+    _, v2 = stats.log_ratio(40, 100, 10, 100, 0.5)
+    assert abs(v1 - v2) < 1e-12
+    _, w1 = stats.log_ratio(10, 100, 10, 100)
+    _, w2 = stats.log_ratio(40, 100, 10, 100)
+    assert w1 != w2          # the old, outcome-dependent variance is what biased winner selection
+
+
+def test_credit_gate_is_fair_and_reserve_is_shared():
+    from controller.loop import Controller
+    with tempfile.TemporaryDirectory() as d:
+        c = object.__new__(Controller)
+        c.s, c.credits, c.credit_total, c.wfs = Store(os.path.join(d, "t.db")), 100.0, 100.0, {"a": 1, "b": 1, "c": 1, "d": 1}
+        share = 0.75 * 100 / 4
+        assert c._credit_gate("a", share)                       # own share is always available
+        c.s.x("INSERT INTO credits VALUES('t','a','x',?,0)", (share,))
+        assert c._credit_gate("a", 20)                          # may draw on the 25% shared reserve...
+        c.s.x("INSERT INTO credits VALUES('t','a','x',20,0)")
+        assert not c._credit_gate("b", share + 6)               # ...but not beyond what remains of it for everyone
+        c.credits = 1.0
+        assert not c._credit_gate("c", 3)                       # never overdraw the real balance
+
+
+def test_world_fingerprint_resets_state_for_a_new_world():
+    from controller.loop import Controller
+
+    class A:
+        def __init__(self, st): self.st = st
+        def get(self, path, **kw): return self.st
+
+    with tempfile.TemporaryDirectory() as d:
+        c = object.__new__(Controller)
+        c.s, c.log = Store(os.path.join(d, "t.db")), lambda *a: None
+        c.api = A({"scenario": "s1", "end_minute": 100, "sim_minute": 0})
+        c.check_world()
+        c.s.kset("cursor:events", 9); c.s.kset("last_minute", 50)
+        c.api = A({"scenario": "s1", "end_minute": 100, "sim_minute": 60})     # crash restart: same world, clock ahead
+        c.check_world()
+        assert c.s.kget("cursor:events") == 9
+        c.api = A({"scenario": "s1", "end_minute": 100, "sim_minute": 0})      # fresh world, same scenario
+        c.check_world()
+        assert c.s.kget("cursor:events") is None

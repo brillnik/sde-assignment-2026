@@ -36,6 +36,7 @@ CREATE INDEX IF NOT EXISTS dec_wf ON decisions(wf, id);
 CREATE TABLE IF NOT EXISTS incidents(id INTEGER PRIMARY KEY AUTOINCREMENT, wf TEXT, kind TEXT, subject TEXT,
   status TEXT, onset_ts TEXT, detected_ts TEXT, resolved_ts TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS credits(ts TEXT, wf TEXT, what TEXT, cost REAL, remaining REAL);
+CREATE TABLE IF NOT EXISTS alerts(key TEXT PRIMARY KEY, wf TEXT, severity TEXT, message TEXT, opened_ts TEXT, cleared_ts TEXT);
 CREATE TABLE IF NOT EXISTS metrics(ts TEXT, name TEXT, value REAL);
 """
 

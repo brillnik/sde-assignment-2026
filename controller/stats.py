@@ -42,10 +42,16 @@ def rate_se(k, n):
     return math.sqrt(p * (1 - p) / max(n, 1))
 
 
-def log_ratio(kv, nv, kr, nr):
-    """log(rate_v/rate_r) with a +0.5 smoothing and delta-method variance of the log ratio."""
+def log_ratio(kv, nv, kr, nr, p0=None):
+    """log(rate_v/rate_r) with +0.5 smoothing. Variance by the delta method. If a workflow-wide rate p0 is given the
+    variance is (1-p0)/p0 * (1/nv + 1/nr): it no longer depends on this cell's own observed outcome. (Using each cell's
+    observed rates makes cells where the challenger got lucky look *more* precise, so inverse-variance weighting is
+    biased upward - found as false winners in null worlds.)"""
     pv, pr = (kv + 0.5) / (nv + 1), (kr + 0.5) / (nr + 1)
-    var = (1 - pv) / (kv + 0.5) + (1 - pr) / (kr + 0.5)
+    if p0:
+        var = (1 - p0) / p0 * (1.0 / (nv + 1) + 1.0 / (nr + 1))
+    else:
+        var = (1 - pv) / (kv + 0.5) + (1 - pr) / (kr + 0.5)
     return math.log(pv / pr), var
 
 

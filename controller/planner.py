@@ -4,6 +4,7 @@ and voice, (c) per-cohort hour weights, and (d) decay / harm checks on live winn
 Everything here is deterministic: closed-form z-scores from a ridge-pooled log-lift model, no sampling."""
 import copy
 import math
+from statistics import NormalDist
 from collections import defaultdict
 
 import numpy as np
@@ -15,6 +16,7 @@ from .ingest import FEATURES, cell_features
 DIMS = ("welcome_message", "voice")
 Z_WIN = 2.2          # one-sided z for a challenger to beat the reference by >= MIN_LIFT in a cohort cell
 Z_AVOID = 2.5        # one-sided z for dropping a clearly worse variant from exploration
+FWER = 0.30          # family-wise false-winner target per evaluation window
 MIN_LIFT = 0.02      # relative lift that is worth a customer-facing change
 MIN_COHORT_SHARE = 0.03
 MAX_COHORTS = 12
@@ -109,8 +111,30 @@ class Planner:
             out[cid] = {str(h): round(min(3.0, max(0.35, v / m)), 3) for h, v in w.items()}
         return out
 
+    def design_effect(self, wf, since_tb, info, dim, ref):
+        """Empirical variance inflation (dials are not independent: engaged leads leave the pool, attempts cluster by
+        lead). Placebo contrast: the *reference* arm split by day parity should show no difference, so
+        phi = mean(y^2)/mean(var) over cells measures how much larger the real variance is than the binomial one."""
+        _, (num, den), _, _ = kpi(info)
+        col = {"welcome_message": "w", "voice": "v"}[dim]
+        rows = self.s.q(f"SELECT cell,(tb/4)%2,SUM({num}),SUM({den}) FROM agg_var WHERE wf=? AND tb>=? AND {col}=? "
+                        f"GROUP BY cell,(tb/4)%2", (wf, since_tb, ref))
+        by = defaultdict(dict)
+        for cell, par, k, n in rows:
+            by[cell][par] = (k or 0, n or 0)
+        tk = sum(v[0] for d in by.values() for v in d.values()); tn = sum(v[1] for d in by.values() for v in d.values())
+        p0 = tk / tn if tn else None
+        ys, vs = [], []
+        for cell, d in by.items():
+            if 0 in d and 1 in d and d[0][1] >= 30 and d[1][1] >= 30:
+                y, v = stats.log_ratio(d[0][0], d[0][1], d[1][0], d[1][1], p0)
+                ys.append(y * y); vs.append(v)
+        if len(ys) < 5:
+            return 1.5
+        return float(min(4.0, max(1.0, sum(ys) / sum(vs))))
+
     # ------------------------------------------------------------------ variant lift model
-    def fit_dim(self, rows, dim, ref, info, feats, options):
+    def fit_dim(self, rows, dim, ref, info, feats, options, phi=1.0):
         """For every non-ref variant of `dim`: ridge log-lift model over cells. Returns {variant: model} plus levels."""
         _, (num, den), _, _ = kpi(info)
         idx = {"num": IDX[num], "den": IDX[den]}
@@ -121,6 +145,8 @@ class Planner:
             c[0] += r[idx["num"]]; c[1] += r[idx["den"]]
         cells = sorted({k[0] for k in cnt})
         levels = {f: sorted({cell_features(c)[f] for c in cells}) for f in FEATURES}
+        tot_k = sum(c[0] for c in cnt.values()); tot_n = sum(c[1] for c in cnt.values())
+        p0 = tot_k / tot_n if tot_n else None
         models, vol = {}, defaultdict(float)
         for (cell, v), (k, n) in cnt.items():
             vol[cell] += n
@@ -131,9 +157,9 @@ class Planner:
             for cell in cells:
                 kv, nv = cnt.get((cell, v), (0, 0))
                 kr, nr = cnt.get((cell, ref), (0, 0))
-                if nv >= 20 and nr >= 20:
-                    y, var = stats.log_ratio(kv, nv, kr, nr)
-                    data.append((cell_features(cell), y, var))
+                if nv >= 5 and nr >= 5:      # tiny cells are fine: variance (outcome-independent) gives them low weight
+                    y, var = stats.log_ratio(kv, nv, kr, nr, p0)
+                    data.append((cell_features(cell), y, var * phi))
             if len(data) < 4:
                 continue
             m = stats.RidgeLogLift()
@@ -186,11 +212,13 @@ class Planner:
 
         # per-dim models on the projected features; predictions per projected cell
         theta = {}                 # (dim, variant, projected cell) -> (theta, var)
+        phi = {}
         analysis = {}
         for dim in DIMS:
             ref = state["ref"][dim]
-            models, levels, cnt, vol = self.fit_dim(prompt_rows, dim, ref, info, feats, options[dim])
-            analysis[dim] = {"ref": ref, "variants": {}}
+            phi[dim] = self.design_effect(wf, since, info, dim, ref)
+            models, levels, cnt, vol = self.fit_dim(prompt_rows, dim, ref, info, feats, options[dim], phi[dim])
+            analysis[dim] = {"ref": ref, "variants": {}, "design_effect": round(phi[dim], 2)}
             for v, m in models.items():
                 for pc in proj_vol:
                     fe = dict(zip(feats, pc))
@@ -213,12 +241,32 @@ class Planner:
         if now_tb - rec_tbs > since:
             rrows = self.window_rows(wf, now_tb - rec_tbs)
             for dim in DIMS:
-                models, *_ = self.fit_dim(rrows, dim, state["ref"][dim], info, feats, options[dim])
+                models, *_ = self.fit_dim(rrows, dim, state["ref"][dim], info, feats, options[dim], phi.get(dim, 1.5))
                 for v, m in models.items():
                     for pc in proj_vol:
                         theta_rec[(dim, v, pc)] = m.predict(dict(zip(feats, pc)))
         # guardrail screen (pooled, per variant)
         blocked = self.guardrail_blocked(wf, info, state, rows, options)
+
+        # Family-wise control: the bar grows with the number of (variant x projected cell) comparisons made and with the
+        # number of daily looks accumulated in the window (repeated looking inflates false winners).
+        m_tests = max(1, sum(1 for k in theta))
+        looks = max(1.0, (now_tb - since) / 4.0)
+        z_win = min(3.6, max(Z_WIN, NormalDist().inv_cdf(1 - FWER / (m_tests * math.sqrt(looks)))))
+        for dim in DIMS:
+            analysis[dim]["z_win"] = round(z_win, 2)
+        live_cohorts = [Cohort.from_cfg(c) for c in live_cfg.get("cohorts", [])]
+
+        def incumbent(dim, pc):
+            """The variant already carrying >=60% of this cell's traffic in the live config (a promoted winner)."""
+            fe = dict(zip(feats, pc))
+            cid = next((c.id for c in live_cohorts if c.matches(fe)), "default")
+            al = live_cfg.get("allocations", {})
+            dist = (al.get(cid, {}).get(dim)) or (al.get("default", {}).get(dim)) or {}
+            if not dist:
+                return None
+            top = max(dist, key=dist.get)
+            return top if dist[top] / (sum(dist.values()) or 1) >= 0.6 and top != state["ref"][dim] else None
 
         bans = state.get("bans", {})
         plan_by_pc = {}
@@ -247,7 +295,10 @@ class Planner:
                                 avoid.add(v)
                             continue
                         t = min(t, tr_t)      # be conservative: promised lift is the smaller of full-window and recent
-                    if t - Z_WIN * se > math.log(1 + MIN_LIFT):
+                    inc = incumbent(dim, pc) == v
+                    # hysteresis: keeping a promoted winner needs only a 90% lower bound > 0 (decay is caught separately);
+                    # promoting a new one needs the full family-wise bar
+                    if (t - 1.28 * se > 0) if inc else (t - z_win * se > math.log(1 + MIN_LIFT)):
                         cands.append((t, v, se))
                     elif t + Z_AVOID * se < 0:
                         avoid.add(v)
@@ -258,7 +309,7 @@ class Planner:
                     plans[dim] = ("explore", None, 0, 0, tuple(sorted(avoid)))
             plan_by_pc[pc] = plans
 
-        key = lambda pl: tuple((pl[d][0], pl[d][1], pl[d][4]) for d in DIMS)
+        key = lambda pl: tuple((pl[d][0], pl[d][1]) for d in DIMS)     # avoid-sets alone must not create/destroy cohorts
         vol_by_key = defaultdict(float)
         for pc, pl in plan_by_pc.items():
             vol_by_key[key(pl)] += proj_vol[pc]

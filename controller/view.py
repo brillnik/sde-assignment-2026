@@ -23,12 +23,15 @@ def serve(ctl, port):
                     out = supervisor_view(db, q.get("wf", [None])[0])
                 elif u.path == "/explain":
                     out = explain(db, q["wf"][0], q.get("at", [None])[0])
+                elif u.path == "/alerts":
+                    cur = db.execute("SELECT key,wf,severity,message,opened_ts,cleared_ts FROM alerts ORDER BY opened_ts DESC LIMIT 100")
+                    out = [dict(zip(["key", "wf", "severity", "message", "opened", "cleared"], r)) for r in cur.fetchall()]
                 elif u.path == "/metrics":
                     out = {"ingest_events_per_s": ctl.stats["ingest_eps"], "decision_lag_s": ctl.stats["decision_lag_s"],
                            "events_total": ctl.ing.total_events, "credits_remaining": ctl.credits, "sim_ts": ctl.now,
                            "tick_seconds": ctl.stats["tick_s"]}
                 else:
-                    out = {"endpoints": ["/view?wf=", "/explain?wf=&at=ISO", "/metrics"]}
+                    out = {"endpoints": ["/view?wf=", "/explain?wf=&at=ISO", "/metrics", "/alerts"]}
                 body = json.dumps(out, indent=1, default=str).encode()
                 self.send_response(200)
             except Exception as e:

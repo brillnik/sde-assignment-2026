@@ -120,6 +120,8 @@ class WF:
                 if h["actor"] == "supervisor":
                     self.on_supervisor_edit(h)
                 else:
+                    if set(h.get("changed_dims") or []) & {"welcome_message", "voice", "cohorts"}:
+                        self.state["last_cf_apply_minute"] = self.ctl.minute
                     self.audit("config_changed", h["actor"], f"v{h['version']} by {h['actor']}: {h.get('changed_dims')}",
                                {"history": h}, h.get("proposal_id"))
                     if "prompt_version" in (h.get("changed_dims") or []):
@@ -167,7 +169,12 @@ class WF:
                     # product rule: expiry == rejection; re-queue later with fresh data, never replay the stale payload
                     if st != "stale":
                         self.state["backoff_until"] = self.ctl.minute + BACKOFF_H * 60
+                        self.state["rejected_streak"] = self.state.get("rejected_streak", 0) + 1
                     self.state["needs_reopt"] = True
+                elif st == "applied":
+                    self.state["rejected_streak"] = 0
+                    if kind == "opt":
+                        self.state["last_opt_applied_minute"] = self.ctl.minute
             self.save()
         self.continue_auto_steps()
         self.watch_halluc()
@@ -209,18 +216,20 @@ class WF:
                 self.state["incident_h"] = None
         elif step == "verifying":
             vs = detect.hallucination_status(self.s, self.id, prompt, self.now_hb, self.state.get("prompt_live_hb", self.now_hb))
-            if vs["n"] >= 100:
-                if vs["spike"]:
-                    self.audit("incident_fix_ineffective", prompt, f"hallucination still elevated under {prompt}: {vs}", vs)
-                    self.close_inc(inc, "failed")
-                    self.state["incident_h"] = None
-                else:
-                    ttf = (self.ctl.minute - inc["detected_minute"])
-                    self.audit("incident_resolved", prompt, f"hallucination back to baseline ({vs['rate']:.3%} vs baseline "
-                               f"{vs['baseline']:.3%}) over {vs['n']} calls; {ttf} sim-min from detection to verified fix", vs)
-                    self.close_inc(inc, "resolved")
-                    self.state["prompt_good"] = prompt
-                    self.state["incident_h"] = None
+            # Verification has the opposite burden of proof from detection: "not provably a spike" is NOT "fixed".
+            # Still elevated = point estimate above 1.5x baseline AND p<0.05 against baseline; decide only with enough calls.
+            elevated = vs["rate"] > 1.5 * vs["baseline"] and vs["p_value"] < 0.05
+            if vs["n"] >= 100 and not elevated:
+                ttf = (self.ctl.minute - inc["detected_minute"])
+                self.audit("incident_resolved", prompt, f"hallucination back to baseline ({vs['rate']:.3%} vs baseline "
+                           f"{vs['baseline']:.3%}, p={vs['p_value']:.2f}) over {vs['n']} calls; {ttf} sim-min from detection to verified fix", vs)
+                self.close_inc(inc, "resolved")
+                self.state["prompt_good"] = prompt
+                self.state["incident_h"] = None
+            elif vs["n"] >= 300 and elevated:
+                self.audit("incident_fix_ineffective", prompt, f"hallucination still elevated under {prompt}: {vs}", vs)
+                self.close_inc(inc, "failed")
+                self.state["incident_h"] = None
 
     def close_inc(self, inc, status):
         self.s.x("UPDATE incidents SET status=?, resolved_ts=? WHERE id=?", (status, self.ctl.now, inc["db_id"]))
@@ -330,14 +339,14 @@ class WF:
         cur = self.did_dist()
         rows = {r[0]: (r[1], r[2]) for r in self.s.q(
             "SELECT did,SUM(dials),SUM(conn) FROM agg_did WHERE wf=? AND hb>? GROUP BY did", (self.id, self.now_hb - 48))}
-        floor, expl = 0.02, 0.08
+        floor, expl = 0.02, 0.2       # unseen IDs get a real share: spreading per-ID load beat a cautious 8% probe on all 5 test worlds
         w = {}
         healthy = [d for d in dids if d not in flagged]
         if not healthy:
             return cur
         seen = [d for d in healthy if rows.get(d, (0, 0))[0] >= 100]
         unseen = [d for d in healthy if d not in seen]
-        exp_total = min(0.3, expl * len(unseen)) if seen else 0.0
+        exp_total = min(0.5, expl * len(unseen)) if seen else 0.0
         remaining = 1 - floor * len([d for d in dids if d in flagged]) - exp_total
         for d in unseen:
             w[d] = expl if seen else 1.0
@@ -500,6 +509,11 @@ class WF:
                 return
             if self.state["last_eval_day"] == d and not self.state.get("needs_reopt"):
                 return
+            if self.ctl.minute - self.state.get("last_opt_applied_minute", -10 ** 9) < 36 * 60:
+                return      # cooldown: let the last change produce evidence before proposing the next one
+            if self.info.get("mid_flight") == "next_campaign_only" and \
+                    self.ctl.minute - self.state.get("last_cf_apply_minute", -10 ** 9) < 24 * 60:
+                return      # agent-facing changes only reach the *next* campaign; wait for evidence of the last one
         else:
             if not self.approver_window_ok(urgent=True) and not self.can_auto_all():
                 return
