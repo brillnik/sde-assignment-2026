@@ -1,6 +1,6 @@
 # Outcome-First Agent Loop — Submission
 
-**Name:** (fill in) · **Date:** 2026-11-09 · **Hours actually spent:** one AI-assisted working session (not 12–16 h of hand-tuning; see §13) · **Language / storage:** Python 3.11, SQLite (WAL) single file, stdlib + numpy + httpx
+**Name:** Nikhil Raj (menikhil.1997@gmail.com) · **Date:** 2026-11-09 · **Hours actually spent:** one AI-assisted working session (not 12–16 h of hand-tuning; see §13) · **Language / storage:** Python 3.11, SQLite (WAL) single file, stdlib + numpy + httpx
 
 ## 0. TL;DR
 - `./run.sh <SIM_URL>` starts one always-on controller that ingests events, detects, experiments, proposes through `/approvals`, applies, verifies, rolls back and records every decision in its own SQLite store.
